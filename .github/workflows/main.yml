@@ -7,23 +7,11 @@ on:
         description: 'Device'
         default: Whyred
         required: true
-      KERNEL_SOURCE:
-        description: 'Kernel Source (ignored — workflow uses current repo)'
-        default: https://github.com/mizukiKu/android_kernel_xiaomi_sdm660_419.git
-        required: true
       KERNEL_SOURCE_BRANCH:
         description: 'Kernel Source Branch'
         required: true
       DEFCONFIG:
         description: 'Kernel Defconfig'
-        required: true
-      ANYKERNEL_URL:
-        description: 'AnyKernel Url'
-        default: https://github.com/dhamar19/AnyKernel3.git
-        required: false
-      ANYKERNEL_BRANCH:
-        description: 'AnyKernel Branch'
-        default: whyred
         required: true
       ENABLE_KERNELSU:
         description: 'KernelSU'
@@ -40,28 +28,27 @@ jobs:
     runs-on: ubuntu-22.04
     permissions:
       contents: write
+
     steps:
 
     - name: Display User Inputs
       run: |
         echo "::group::User Environment Variables"
         echo "DEVICE: ${{ github.event.inputs.DEVICE }}"
-        echo "Kernel Source: repository ${{ github.repository }} (local to workflow) /tree/${{ github.event.inputs.KERNEL_SOURCE_BRANCH }}"
+        echo "Kernel Branch: ${{ github.event.inputs.KERNEL_SOURCE_BRANCH }}"
         echo "Kernel Defconfig: ${{ github.event.inputs.DEFCONFIG }}"
-        echo "AnyKernel Url: ${{ github.event.inputs.ANYKERNEL_URL }}/tree/${{ github.event.inputs.ANYKERNEL_BRANCH }}"
-        echo "KernelSU: ${{ fromJSON('["No", "Yes"]')[fromJSON(github.event.inputs.ENABLE_KERNELSU)] }}"
-        echo "Full KernelSU URL: ${{ github.event.inputs.KERNELSU_URL}}"
+        echo "KernelSU: ${{ fromJSON('["No","Yes"]')[fromJSON(github.event.inputs.ENABLE_KERNELSU)] }}"
+        echo "KernelSU URL: ${{ github.event.inputs.KERNELSU_URL }}"
         echo "::endgroup::"
 
     - name: Initialize workspace
       run: |
         mkdir -p workspace
-        # store a stable workspace-folder path (absolute)
         echo "workspace-folder=${GITHUB_WORKSPACE}/workspace" >> $GITHUB_OUTPUT
         echo "start_time=$(date +%s)" >> $GITHUB_OUTPUT
-        echo "kernelsu=${{ fromJSON('["No", "Yes"]')[fromJSON(github.event.inputs.ENABLE_KERNELSU)] }}" >> $GITHUB_OUTPUT
+        echo "kernelsu=${{ fromJSON('["No","Yes"]')[fromJSON(github.event.inputs.ENABLE_KERNELSU)] }}" >> $GITHUB_OUTPUT
       id: workspace
-      
+
     - name: Prepare the build environment
       run: |
         sudo apt update -y && sudo apt upgrade -y
@@ -71,28 +58,21 @@ jobs:
       working-directory: ${{ steps.workspace.outputs.workspace-folder }}
       id: tools
 
-    - name: Checkout kernel source (current repository)
+    - name: Checkout kernel source (current repo)
       uses: actions/checkout@v4
       with:
-        # checkout the branch specified by input into a folder called kernel_tree
         ref: ${{ github.event.inputs.KERNEL_SOURCE_BRANCH }}
         path: kernel_tree
 
     - name: Set kernel folder output
       run: |
-        # actions/checkout created directory at $GITHUB_WORKSPACE/kernel_tree
         echo "kernel-folder=${GITHUB_WORKSPACE}/kernel_tree" >> $GITHUB_OUTPUT
       id: kernel
 
     - name: Adding KernelSU
       if: ${{ steps.workspace.outputs.kernelsu == 'Yes' }}
       run: |
-        if [ -d "KernelSU" ]; then
-          rm -rf "KernelSU"
-        fi
-        if [ -d "drivers/kernelsu" ]; then
-          rm -rf "drivers/kernelsu"
-        fi
+        rm -rf KernelSU drivers/kernelsu || true
         eval ${{ github.event.inputs.KERNELSU_URL }}
       working-directory: ${{ steps.kernel.outputs.kernel-folder }}
 
@@ -100,73 +80,22 @@ jobs:
       run: |
         set -e
         export CLANGDIR="${{ steps.tools.outputs.tools-folder }}/clang"
-        rm -f ${{ steps.kernel.outputs.kernel-folder }}/out/compile.log
-        mkdir -p ${{ steps.kernel.outputs.kernel-folder }}/out
-
-        export KBUILD_BUILD_USER="builder"
-        export KBUILD_BUILD_HOST="dhamarar"
-        export USE_CCACHE=1
+        mkdir -p out
         export PATH="$CLANGDIR/bin:$PATH"
-        
-        export KCFLAGS="$KCFLAGS -Wno-default-const-init-field-unsafe"
-        
+
         make clean && make mrproper
         make O=out ARCH=arm64 ${{ github.event.inputs.DEFCONFIG }}_defconfig
 
-        make -j$(nproc --all) O=out LLVM=1 LLVM_IAS=1 \
-         ARCH=arm64 \
-         CC=clang \
-         LD=ld.lld \
-         AR=llvm-ar \
-         AS=llvm-as \
-         NM=llvm-nm \
-         STRIP=llvm-strip \
-         OBJCOPY=llvm-objcopy \
-         OBJDUMP=llvm-objdump \
-         READELF=llvm-readelf \
-         HOSTCC=clang \
-         HOSTCXX=clang++ \
-         HOSTAR=llvm-ar \
-         HOSTLD=ld.lld \
-         CROSS_COMPILE=aarch64-linux-gnu- \
-         CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-         2>&1 | tee -a ${{ steps.kernel.outputs.kernel-folder }}/out/compile.log
-         
-        cp ${{ steps.kernel.outputs.kernel-folder }}/out/compile.log $GITHUB_WORKSPACE/
-        echo "elapsed_time=$(echo "$(date +%s)"-"${{ steps.workspace.outputs.start_time }}" | bc)" >> $GITHUB_OUTPUT
+        make -j$(nproc) \
+          O=out LLVM=1 LLVM_IAS=1 ARCH=arm64 CC=clang LD=ld.lld \
+          AR=llvm-ar AS=llvm-as NM=llvm-nm STRIP=llvm-strip \
+          OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump READELF=llvm-readelf \
+          HOSTCC=clang HOSTCXX=clang++ HOSTAR=llvm-ar HOSTLD=ld.lld \
+          CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+          2>&1 | tee out/compile.log
       working-directory: ${{ steps.kernel.outputs.kernel-folder }}
       id: build
 
-    - name: AnyKernel3
-      if: ${{ success() && github.event.inputs.ANYKERNEL_URL != '' }}
-      run: |
-        set -e
-        if [[ -z "${{ github.event.inputs.ANYKERNEL_BRANCH }}" ]]; then
-          anykernel_branch=${{ github.event.inputs.DEFCONFIG }}
-        else
-          anykernel_branch=${{ github.event.inputs.ANYKERNEL_BRANCH }}
-        fi
-        git clone --recursive --depth=1 ${{ github.event.inputs.ANYKERNEL_URL }} -b $anykernel_branch AnyKernel3
-
-        if [ -f "Image.gz-dtb" ]; then
-          cp -f Image.gz-dtb AnyKernel3/Image.gz-dtb
-        elif [ -f "Image.gz" ]; then
-          cp -f Image.gz AnyKernel3/Image.gz
-        elif [ -f "Image" ]; then
-          cp -f Image AnyKernel3/Image
-        else
-          echo "Error: Tidak menemukan Image atau Image.gz!"
-          exit 1
-        fi
-
-        name=AnyKernel3-Fulmen-${{ github.event.inputs.DEVICE }}${{ fromJSON('["", "-KSU"]')[fromJSON(github.event.inputs.ENABLE_KERNELSU)] }}-$(date +%Y%m%d-%H%M).zip
-        cd AnyKernel3
-        zip -q -r $name *
-        mv $name ../
-        echo "zipname=$name" >> $GITHUB_OUTPUT
-      working-directory: ${{ steps.kernel.outputs.kernel-folder }}/out/arch/arm64/boot/
-      id: anykernel
-      
     - name: Get build info
       run: |
         cd ${{ steps.kernel.outputs.kernel-folder }}
@@ -174,24 +103,21 @@ jobs:
         echo "KERNEL_VERSION=$(make kernelversion)" >> $GITHUB_ENV
         echo "CLANG_VERSION=$($CLANG_PATH --version | head -n1)" >> $GITHUB_ENV
         echo "LAST_COMMIT=$(git log -1 --pretty=format:'%h - %s')" >> $GITHUB_ENV
-        ls -al ${{ steps.kernel.outputs.kernel-folder }}/out/arch/arm64/boot/
-        
-    - name: Upload Kernel
-      if: ${{ success() && steps.anykernel.outputs.zipname != '' }} 
+        ls -al out/arch/arm64/boot/
+
+    - name: Upload Kernel Image Only
+      if: success()
       uses: actions/upload-artifact@v4
       with:
-        name: ${{ steps.anykernel.outputs.zipname }}
+        name: kernel_image
         path: |
-          ${{ steps.kernel.outputs.kernel-folder }}/out/arch/arm64/boot/${{ steps.anykernel.outputs.zipname }}
-          ${{ steps.kernel.outputs.kernel-folder }}/out/${{ steps.anykernel.outputs.zipname }}
-          ${{ steps.kernel.outputs.kernel-folder }}/**/${{ steps.anykernel.outputs.zipname }}
+          ${{ steps.kernel.outputs.kernel-folder }}/out/arch/arm64/boot/Image*
+          ${{ steps.kernel.outputs.kernel-folder }}/out/arch/arm64/boot/dtb*
+          ${{ steps.kernel.outputs.kernel-folder }}/out/arch/arm64/boot/*.gz*
 
     - name: Upload Build Log
       if: always()
       uses: actions/upload-artifact@v4
       with:
         name: compile.log
-        path: |
-          ${{ steps.kernel.outputs.kernel-folder }}/out/compile.log
-          $GITHUB_WORKSPACE/compile.log
-        compression-level: 0
+        path: ${{ steps.kernel.outputs.kernel-folder }}/out/compile.log
