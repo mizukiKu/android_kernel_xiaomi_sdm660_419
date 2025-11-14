@@ -90,23 +90,6 @@ jobs:
         eval ${{ github.event.inputs.KERNELSU_URL }}
       working-directory: ${{ steps.kernel.outputs.kernel-folder }}
 
-    - name: Send Telegram notification for start build
-      uses: MizukiKurogane/telegram-action@master
-      env:
-        TELEGRAM_TO: ${{ secrets.TELEGRAM_TO }}
-      with:
-        to: ${{ secrets.TELEGRAM_TO }}
-        token: ${{ secrets.TELEGRAM_TOKEN }}
-        disable_web_page_preview: true
-        message: |
-          <b>🔥Kernel Build Start...</b>
-          
-          <b>📱 Device:</b> ${{ github.event.inputs.DEVICE }}
-          <b>🏷️ Branch:</b> ${{ github.event.inputs.KERNEL_SOURCE_BRANCH }}
-          
-          <b>Action</b>: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        format: html
-
     - name: Building kernel
       run: |
         set -e
@@ -124,7 +107,7 @@ jobs:
         make clean && make mrproper
         make O=out ARCH=arm64 ${{ github.event.inputs.DEFCONFIG }}_defconfig
 
-         make -j$(nproc --all) O=out LLVM=1 LLVM_IAS=1 \
+        make -j$(nproc --all) O=out LLVM=1 LLVM_IAS=1 \
          ARCH=arm64 \
          CC=clang \
          LD=ld.lld \
@@ -206,40 +189,3 @@ jobs:
           ${{ steps.kernel.outputs.kernel-folder }}/out/compile.log
           $GITHUB_WORKSPACE/compile.log
         compression-level: 0
-        
-    - name: Send Telegram notification for success
-      uses: MizukiKurogane/telegram-action@master
-      env:
-        TELEGRAM_TO: ${{ secrets.TELEGRAM_TO }}
-      if: ${{ success() && steps.anykernel.outputs.zipname != '' && env.TELEGRAM_TO != '' }}
-      with:
-        to: ${{ secrets.TELEGRAM_TO }}
-        token: ${{ secrets.TELEGRAM_TOKEN }}
-        disable_web_page_preview: true
-        message: |
-          <b>✅ Kernel Successfully Build</b>
-          <b>📱 Device:</b> ${{ github.event.inputs.DEVICE }}
-          <b>🏷️ Branch:</b> ${{ github.event.inputs.KERNEL_SOURCE_BRANCH }}
-          <b>🧬 Kernel Version:</b> ${{ env.KERNEL_VERSION }}
-          <b>🗒️ Last Commit:</b> ${{ env.LAST_COMMIT }}
-          <b>⚙️ Compiler:</b> ${{ env.CLANG_VERSION }}
-          <b>⏳ Build Time:</b> ${{ steps.build.outputs.elapsed_time }} seconds. 
-          
-          <b>Kernel Source</b>: ${{ github.event.inputs.KERNEL_SOURCE }}/tree/${{ github.event.inputs.KERNEL_SOURCE_BRANCH }}
-          <b>Action</b>: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        document: ${{ steps.kernel.outputs.kernel-folder }}/out/arch/arm64/boot/${{ steps.anykernel.outputs.zipname }}
-        format: html
-
-    - name: Send Telegram notification for failure
-      uses: MizukiKurogane/telegram-action@master
-      env:
-        TELEGRAM_TO: ${{ secrets.TELEGRAM_TO }}
-      if: ${{ failure() && env.TELEGRAM_TO != '' }}
-      with:
-        to: ${{ secrets.TELEGRAM_TO }}
-        token: ${{ secrets.TELEGRAM_TOKEN }}
-        disable_web_page_preview: true
-        document: ${{ steps.kernel.outputs.kernel-folder }}/out/compile.log
-        message: |
-          <b>❌ Failed building kernel</b>, check ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }} for more info.         
-        format: html
