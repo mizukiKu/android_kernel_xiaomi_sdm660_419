@@ -1,0 +1,133 @@
+name: Kernel Build 4.19 noh
+
+on:
+  workflow_dispatch:
+    inputs:
+      DEVICE:
+        description: 'Device'
+        default: Whyred
+        required: true
+      KERNEL_SOURCE_BRANCH:
+        description: 'Kernel Source Branch'
+        required: true
+      DEFCONFIG:
+        description: 'Kernel Defconfig'
+        required: true
+      ANYKERNEL_URL:
+        description: 'AnyKernel Url'
+        default: https://github.com/dhamar19/AnyKernel3.git
+        required: false
+      ANYKERNEL_BRANCH:
+        description: 'AnyKernel Branch'
+        default: whyred
+        required: true
+      ENABLE_KERNELSU:
+        description: 'KernelSU'
+        type: boolean
+        default: false
+      KERNELSU_URL:
+        description: 'Full KernelSU URL'
+        required: false
+        default: curl -LSs "https://raw.githubusercontent.com/rsuntk/KernelSU/main/kernel/setup.sh" | bash -s main
+
+jobs:
+  build:
+    if: github.event.repository.owner.id == github.event.sender.id
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+
+    - name: Display User Inputs
+      run: |
+        echo "::group::User Environment Variables"
+        echo "DEVICE: ${{ github.event.inputs.DEVICE }}"
+        echo "Kernel Branch: ${{ github.event.inputs.KERNEL_SOURCE_BRANCH }}"
+        echo "Kernel Defconfig: ${{ github.event.inputs.DEFCONFIG }}"
+        echo "AnyKernel Url: ${{ github.event.inputs.ANYKERNEL_URL }}/tree/${{ github.event.inputs.ANYKERNEL_BRANCH }}"
+        echo "KernelSU: ${{ fromJSON('["No", "Yes"]')[fromJSON(github.event.inputs.ENABLE_KERNELSU)] }}"
+        echo "KernelSU URL: ${{ github.event.inputs.KERNELSU_URL }}"
+        echo "::endgroup::"
+
+    - name: Initialize workspace
+      run: |
+        mkdir -p workspace
+        echo "workspace-folder=${GITHUB_WORKSPACE}/workspace" >> $GITHUB_OUTPUT
+        echo "start_time=$(date +%s)" >> $GITHUB_OUTPUT
+        echo "kernelsu=${{ fromJSON('["No", "Yes"]')[fromJSON(github.event.inputs.ENABLE_KERNELSU)] }}" >> $GITHUB_OUTPUT
+      id: workspace
+
+    - name: Prepare the build environment
+      run: |
+        sudo apt update -y && sudo apt upgrade -y
+        sudo apt-get install -y bc flex curl git zip ftp libncurses5 libssl-dev lftp zstd wget libfl-dev python3 libarchive-tools gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+        mkdir clang && curl https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/508ea7dd0d8f681904d0422e98af9613aaabf180/clang-r574158.tar.gz -RLO && tar -C clang/ -xf clang-*.tar.gz
+        echo "tools-folder=$(pwd)" >> $GITHUB_OUTPUT
+      working-directory: ${{ steps.workspace.outputs.workspace-folder }}
+      id: tools
+
+    - name: Checkout kernel source (current repo)
+      uses: actions/checkout@v4
+      with:
+        ref: ${{ github.event.inputs.KERNEL_SOURCE_BRANCH }}
+        path: kernel_tree
+
+    - name: Set kernel folder output
+      run: |
+        echo "kernel-folder=${GITHUB_WORKSPACE}/kernel_tree" >> $GITHUB_OUTPUT
+      id: kernel
+
+    - name: Adding KernelSU
+      if: ${{ steps.workspace.outputs.kernelsu == 'Yes' }}
+      run: |
+        rm -rf KernelSU drivers/kernelsu || true
+        eval ${{ github.event.inputs.KERNELSU_URL }}
+      working-directory: ${{ steps.kernel.outputs.kernel-folder }}
+
+    - name: Building kernel
+      run: |
+        set -e
+        export CLANGDIR="${{ steps.tools.outputs.tools-folder }}/clang"
+        mkdir -p out
+        export PATH="$CLANGDIR/bin:$PATH"
+
+        make clean && make mrproper
+        make O=out ARCH=arm64 ${{ github.event.inputs.DEFCONFIG }}_defconfig
+
+        make -j$(nproc) \
+          O=out LLVM=1 LLVM_IAS=1 ARCH=arm64 CC=clang LD=ld.lld \
+          AR=llvm-ar AS=llvm-as NM=llvm-nm STRIP=llvm-strip \
+          OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump READELF=llvm-readelf \
+          HOSTCC=clang HOSTCXX=clang++ HOSTAR=llvm-ar HOSTLD=ld.lld \
+          CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+          2>&1 | tee out/compile.log
+      working-directory: ${{ steps.kernel.outputs.kernel-folder }}
+      id: build
+
+    - name: AnyKernel3
+      if: ${{ success() && github.event.inputs.ANYKERNEL_URL != '' }}
+      run: |
+        git clone --depth=1 ${{ github.event.inputs.ANYKERNEL_URL }} -b ${{ github.event.inputs.ANYKERNEL_BRANCH }} AnyKernel3
+        cp out/arch/arm64/boot/Image* AnyKernel3/ || { echo "Kernel image not found"; exit 1; }
+        name=AnyKernel3-${{ github.event.inputs.DEVICE }}$( [ "${{ steps.workspace.outputs.kernelsu }}" = "Yes" ] && echo '-KSU')-$(date +%Y%m%d-%H%M).zip
+        cd AnyKernel3
+        zip -r $name *
+        mv $name ../
+        echo "zipname=$name" >> $GITHUB_OUTPUT
+      working-directory: ${{ steps.kernel.outputs.kernel-folder }}
+      id: anykernel
+
+    - name: Upload Kernel
+      if: ${{ success() }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: kernel.zip
+        path: |
+          ${{ steps.kernel.outputs.kernel-folder }}/AnyKernel3/*.zip
+
+    - name: Upload Build Log
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: compile.log
+        path: ${{ steps.kernel.outputs.kernel-folder }}/out/compile.log
