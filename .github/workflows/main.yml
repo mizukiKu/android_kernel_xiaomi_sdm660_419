@@ -1,123 +1,35 @@
-name: Kernel Build 4.19
+name: Compile kernel
 
 on:
   workflow_dispatch:
-    inputs:
-      DEVICE:
-        description: 'Device'
-        default: Whyred
-        required: true
-      KERNEL_SOURCE_BRANCH:
-        description: 'Kernel Source Branch'
-        required: true
-      DEFCONFIG:
-        description: 'Kernel Defconfig'
-        required: true
-      ENABLE_KERNELSU:
-        description: 'KernelSU'
-        type: boolean
-        default: false
-      KERNELSU_URL:
-        description: 'Full KernelSU URL'
-        required: false
-        default: curl -LSs "https://raw.githubusercontent.com/rsuntk/KernelSU/main/kernel/setup.sh" | bash -s main
 
 jobs:
-  build:
-    if: github.event.repository.owner.id == github.event.sender.id
-    runs-on: ubuntu-22.04
-    permissions:
-      contents: write
+  compile:
+    runs-on: ubuntu-latest
 
     steps:
+      - uses: actions/checkout@v5
 
-    - name: Display User Inputs
-      run: |
-        echo "::group::User Environment Variables"
-        echo "DEVICE: ${{ github.event.inputs.DEVICE }}"
-        echo "Kernel Branch: ${{ github.event.inputs.KERNEL_SOURCE_BRANCH }}"
-        echo "Kernel Defconfig: ${{ github.event.inputs.DEFCONFIG }}"
-        echo "KernelSU: ${{ fromJSON('["No","Yes"]')[fromJSON(github.event.inputs.ENABLE_KERNELSU)] }}"
-        echo "KernelSU URL: ${{ github.event.inputs.KERNELSU_URL }}"
-        echo "::endgroup::"
+      - name: Get AOSP Clang
+        run: |
+          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/mirror-goog-main-llvm-toolchain-source/clang-r574158.tar.gz
+          mkdir aosp-clang
+          tar -xzf clang-r574158.tar.gz -C aosp-clang
 
-    - name: Initialize workspace
-      run: |
-        mkdir -p workspace
-        echo "workspace-folder=${GITHUB_WORKSPACE}/workspace" >> $GITHUB_OUTPUT
-        echo "start_time=$(date +%s)" >> $GITHUB_OUTPUT
-        echo "kernelsu=${{ fromJSON('["No","Yes"]')[fromJSON(github.event.inputs.ENABLE_KERNELSU)] }}" >> $GITHUB_OUTPUT
-      id: workspace
+      - name: Compile kernel
+        run: ./scripts/RvCompiler/compile.sh DEFCONFIG=vendor/whyred-perf_defconfig CLANG_DIR=$PWD/aosp-clang KBUILD_BUILD_USER=Rve KBUILD_BUILD_HOST=RvEnterprises
 
-    - name: Prepare the build environment
-      run: |
-        sudo apt update -y && sudo apt upgrade -y
-        sudo apt-get install -y bc flex curl git zip ftp libncurses5 libssl-dev lftp zstd wget libfl-dev python3 libarchive-tools gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
-        mkdir clang && curl https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/508ea7dd0d8f681904d0422e98af9613aaabf180/clang-r574158.tar.gz -RLO && tar -C clang/ -xf clang-*.tar.gz
-        echo "tools-folder=$(pwd)" >> $GITHUB_OUTPUT
-      working-directory: ${{ steps.workspace.outputs.workspace-folder }}
-      id: tools
+      - name: Upload Image & DTBO
+        uses: actions/upload-artifact@v4
+        with:
+          name: RvKernel-Alioth
+          path: |
+            out/arch/arm64/boot/Image
+            out/arch/arm64/boot/dtb.img
+            out/arch/arm64/boot/image.gz-dtb
 
-    - name: Checkout kernel source (current repo)
-      uses: actions/checkout@v4
-      with:
-        ref: ${{ github.event.inputs.KERNEL_SOURCE_BRANCH }}
-        path: kernel_tree
-
-    - name: Set kernel folder output
-      run: |
-        echo "kernel-folder=${GITHUB_WORKSPACE}/kernel_tree" >> $GITHUB_OUTPUT
-      id: kernel
-
-    - name: Adding KernelSU
-      if: ${{ steps.workspace.outputs.kernelsu == 'Yes' }}
-      run: |
-        rm -rf KernelSU drivers/kernelsu || true
-        eval ${{ github.event.inputs.KERNELSU_URL }}
-      working-directory: ${{ steps.kernel.outputs.kernel-folder }}
-
-    - name: Building kernel
-      run: |
-        set -e
-        export CLANGDIR="${{ steps.tools.outputs.tools-folder }}/clang"
-        mkdir -p out
-        export PATH="$CLANGDIR/bin:$PATH"
-
-        make clean && make mrproper
-        make O=out ARCH=arm64 ${{ github.event.inputs.DEFCONFIG }}_defconfig
-
-        make -j$(nproc) \
-          O=out LLVM=1 LLVM_IAS=1 ARCH=arm64 CC=clang LD=ld.lld \
-          AR=llvm-ar AS=llvm-as NM=llvm-nm STRIP=llvm-strip \
-          OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump READELF=llvm-readelf \
-          HOSTCC=clang HOSTCXX=clang++ HOSTAR=llvm-ar HOSTLD=ld.lld \
-          CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-          2>&1 | tee out/compile.log
-      working-directory: ${{ steps.kernel.outputs.kernel-folder }}
-      id: build
-
-    - name: Get build info
-      run: |
-        cd ${{ steps.kernel.outputs.kernel-folder }}
-        CLANG_PATH="${{ steps.tools.outputs.tools-folder }}/clang/bin/clang"
-        echo "KERNEL_VERSION=$(make kernelversion)" >> $GITHUB_ENV
-        echo "CLANG_VERSION=$($CLANG_PATH --version | head -n1)" >> $GITHUB_ENV
-        echo "LAST_COMMIT=$(git log -1 --pretty=format:'%h - %s')" >> $GITHUB_ENV
-        ls -al out/arch/arm64/boot/
-
-    - name: Upload Kernel Image Only
-      if: success()
-      uses: actions/upload-artifact@v4
-      with:
-        name: kernel_image
-        path: |
-          ${{ steps.kernel.outputs.kernel-folder }}/out/arch/arm64/boot/Image*
-          ${{ steps.kernel.outputs.kernel-folder }}/out/arch/arm64/boot/dtb*
-          ${{ steps.kernel.outputs.kernel-folder }}/out/arch/arm64/boot/*.gz*
-
-    - name: Upload Build Log
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: compile.log
-        path: ${{ steps.kernel.outputs.kernel-folder }}/out/compile.log
+      - name: Upload log
+        uses: actions/upload-artifact@v4
+        with:
+          name: compile-log
+          path: out/compile.log
