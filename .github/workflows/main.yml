@@ -8,7 +8,7 @@ on:
         default: Whyred
         required: true
       KERNEL_SOURCE:
-        description: 'Kernel Source'
+        description: 'Kernel Source (ignored — workflow uses current repo)'
         default: https://github.com/mizukiKu/android_kernel_xiaomi_sdm660_419.git
         required: true
       KERNEL_SOURCE_BRANCH:
@@ -46,7 +46,7 @@ jobs:
       run: |
         echo "::group::User Environment Variables"
         echo "DEVICE: ${{ github.event.inputs.DEVICE }}"
-        echo "Kernel Source: ${{ github.event.inputs.KERNEL_SOURCE }}/tree/${{ github.event.inputs.KERNEL_SOURCE_BRANCH }}"
+        echo "Kernel Source: repository ${{ github.repository }} (local to workflow) /tree/${{ github.event.inputs.KERNEL_SOURCE_BRANCH }}"
         echo "Kernel Defconfig: ${{ github.event.inputs.DEFCONFIG }}"
         echo "AnyKernel Url: ${{ github.event.inputs.ANYKERNEL_URL }}/tree/${{ github.event.inputs.ANYKERNEL_BRANCH }}"
         echo "KernelSU: ${{ fromJSON('["No", "Yes"]')[fromJSON(github.event.inputs.ENABLE_KERNELSU)] }}"
@@ -55,9 +55,9 @@ jobs:
 
     - name: Initialize workspace
       run: |
-        mkdir workspace
-        cd workspace
-        echo "workspace-folder=$(pwd)" >> $GITHUB_OUTPUT
+        mkdir -p workspace
+        # store a stable workspace-folder path (absolute)
+        echo "workspace-folder=${GITHUB_WORKSPACE}/workspace" >> $GITHUB_OUTPUT
         echo "start_time=$(date +%s)" >> $GITHUB_OUTPUT
         echo "kernelsu=${{ fromJSON('["No", "Yes"]')[fromJSON(github.event.inputs.ENABLE_KERNELSU)] }}" >> $GITHUB_OUTPUT
       id: workspace
@@ -71,11 +71,17 @@ jobs:
       working-directory: ${{ steps.workspace.outputs.workspace-folder }}
       id: tools
 
-    - name: Clone kernel source
+    - name: Checkout kernel source (current repository)
+      uses: actions/checkout@v4
+      with:
+        # checkout the branch specified by input into a folder called kernel_tree
+        ref: ${{ github.event.inputs.KERNEL_SOURCE_BRANCH }}
+        path: kernel_tree
+
+    - name: Set kernel folder output
       run: |
-        git clone --depth=1 ${{ github.event.inputs.KERNEL_SOURCE }} -b ${{ github.event.inputs.KERNEL_SOURCE_BRANCH }} kernel_tree
-        echo "kernel-folder=$(pwd)/kernel_tree" >> $GITHUB_OUTPUT
-      working-directory: ${{ steps.workspace.outputs.workspace-folder }}
+        # actions/checkout created directory at $GITHUB_WORKSPACE/kernel_tree
+        echo "kernel-folder=${GITHUB_WORKSPACE}/kernel_tree" >> $GITHUB_OUTPUT
       id: kernel
 
     - name: Adding KernelSU
