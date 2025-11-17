@@ -7,14 +7,40 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+      - name: Install Dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y bc \
+            binutils-dev \
+            bison \
+            build-essential \
+            ca-certificates \
+            ccache \
+            clang \
+            cmake \
+            curl \
+            file \
+            flex \
+            git \
+            libelf-dev \
+            libssl-dev \
+            lld \
+            make \
+            ninja-build \
+            python3-dev \
+            texinfo \
+            u-boot-tools \
+            xz-utils \
+            zlib1g-dev
+
+      - name: Clone Zyc tc-build
+        run: |
+          git clone --depth=1 https://github.com/ZyCromerZ/tc-build.git /tmp/tc-build
+
       - name: Checkout kernel source
         uses: actions/checkout@v4
 
-      - name: Clone Zyc Clang 22.0.0
-        run: |
-          git clone --depth=1 https://github.com/ZyCromerZ/Clang.git -b 22 /tmp/zyc
-
-      - name: Android kernel build (Zyc Clang 22 + Full LTO + POLLY)
+      - name: Android kernel build (Clang)
         uses: lemniskett/android-kernel-actions@master
         id: build
         env:
@@ -22,7 +48,6 @@ jobs:
         with:
           arch: arm64
           compiler: clang
-          clang-path: /tmp/zyc
           defconfig: whyred_defconfig
           image: Image.gz-dtb
 
