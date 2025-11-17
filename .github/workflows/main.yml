@@ -23,11 +23,23 @@ jobs:
           arch: arm64
           compiler: clang
           clang-path: /tmp/zyc
-          defconfig: vendor/whyred-perf_defconfig
+          defconfig: whyred_defconfig
           image: Image.gz-dtb
 
-      - name: Upload Kernel
+      - name: Upload Kernel (Image.gz-dtb)
         uses: actions/upload-artifact@v4
         with:
           name: kernel
           path: ${{ steps.build.outputs.outfile }}
+
+      - name: Upload Image.xz
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-xz
+          path: out/arch/arm64/boot/Image.xz
+
+      - name: Upload kernel.dtb
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-dtb
+          path: out/arch/arm64/boot/dts/**/*.dtb
