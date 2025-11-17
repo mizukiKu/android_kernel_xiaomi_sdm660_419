@@ -6,8 +6,15 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      # fallback default; akan di-overwrite jika ditemukan hasil tc-build
+      CLANG_PATH: /usr/bin
     steps:
-      - name: Install Dependencies
+      - name: Mark workspace safe for git
+        run: |
+          git config --global --add safe.directory $GITHUB_WORKSPACE
+
+      - name: Install dependencies (Debian/Ubuntu list from README)
         run: |
           sudo apt update
           sudo apt install -y bc \
@@ -33,14 +40,97 @@ jobs:
             xz-utils \
             zlib1g-dev
 
-      - name: Clone Zyc tc-build
+      - name: Clone tc-build
         run: |
+          rm -rf /tmp/tc-build
           git clone --depth=1 https://github.com/ZyCromerZ/tc-build.git /tmp/tc-build
+          ls -la /tmp/tc-build
+
+      - name: Run build-binutils.py (if present)
+        id: build-binutils
+        run: |
+          set -eux
+          cd /tmp/tc-build
+          if [ -f ./build-binutils.py ]; then
+            chmod +x ./build-binutils.py || true
+            # jalankan dengan python3, gunakan opsi default (lihat README)
+            python3 ./build-binutils.py
+            echo "binutils_ok=1" >> $GITHUB_OUTPUT
+          else
+            echo "binutils_ok=0" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run build-llvm.py
+        id: build-llvm
+        run: |
+          set -eux
+          cd /tmp/tc-build
+          if [ ! -f ./build-llvm.py ]; then
+            echo "::error::build-llvm.py not found in tc-build repo"
+            exit 1
+          fi
+          chmod +x ./build-llvm.py || true
+
+          # Jalankan build-llvm.py memakai python3. Jika environment perlu override (mis. CC), bisa ditambahkan di sini.
+          # Script default menginstall ke folder 'install' di root repo (lihat README).
+          python3 ./build-llvm.py
+
+          # Setelah selesai, cari lokasi hasil instalasi yang umum (README: default 'install').
+          echo "Searching for llvm install directory..."
+          CANDIDATES=(
+            "/tmp/tc-build/install"
+            "/tmp/tc-build/out"
+            "/tmp/tc-build/prebuilt"
+            "/tmp/tc-build/llvm/install"
+            "/tmp/tc-build/build/install"
+            "/tmp/tc-build/install/clang"
+            "/tmp/tc-build/prebuilts"
+          )
+
+          FOUND=""
+          for p in "${CANDIDATES[@]}"; do
+            for q in $(compgen -G "$p" 2>/dev/null || true); do
+              if [ -x "$q/bin/clang" ] || [ -x "$q/clang/bin/clang" ] || [ -f "$q/bin/clang" ]; then
+                FOUND="$q"
+                break 2
+              fi
+            done
+          done
+
+          # fallback: cari binary 'clang' secara rekursif
+          if [ -z "$FOUND" ]; then
+            FPATH=$(find /tmp/tc-build -type f -name clang -o -name clang-*-* 2>/dev/null | head -n 1 || true)
+            if [ -n "$FPATH" ]; then
+              FOUND=$(dirname "$FPATH")
+            fi
+          fi
+
+          if [ -n "$FOUND" ]; then
+            # normalisasi supaya CLANG_PATH menunjuk ke folder yang memiliki bin/clang
+            if [ -d "$FOUND/bin" ] && [ -f "$FOUND/bin/clang" ]; then
+              TOOLCHAIN_DIR="$FOUND"
+            elif [ -d "$FOUND/clang/bin" ] && [ -f "$FOUND/clang/bin/clang" ]; then
+              TOOLCHAIN_DIR="$FOUND/clang"
+            else
+              TOOLCHAIN_DIR="$FOUND"
+            fi
+            echo "toolchain_dir=$TOOLCHAIN_DIR" >> $GITHUB_OUTPUT
+          else
+            echo "::warning::No clang/llvm install dir detected automatically. Check the build logs."
+            echo "toolchain_dir=" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Set CLANG_PATH from tc-build (if found)
+        if: steps.build-llvm.outputs.toolchain_dir != ''
+        run: |
+          echo "Using toolchain at: ${{ steps.build-llvm.outputs.toolchain_dir }}"
+          # jika toolchain berada di <dir>/bin, set CLANG_PATH ke <dir>
+          echo "CLANG_PATH=${{ steps.build-llvm.outputs.toolchain_dir }}" >> $GITHUB_ENV
 
       - name: Checkout kernel source
         uses: actions/checkout@v4
 
-      - name: Android kernel build (Clang)
+      - name: Android kernel build (use tc-build clang if present)
         uses: lemniskett/android-kernel-actions@master
         id: build
         env:
@@ -48,22 +138,36 @@ jobs:
         with:
           arch: arm64
           compiler: clang
+          clang-path: ${{ env.CLANG_PATH }}
           defconfig: whyred_defconfig
           image: Image.gz-dtb
 
+      - name: Fallback: manual kernel build for debugging (runs if action failed)
+        if: failure()
+        run: |
+          echo "Action-based kernel build failed — attempting manual make using CLANG_PATH or system clang."
+          export PATH="${CLANG_PATH:-/usr/bin}:$PATH"
+          export CC=clang
+          mkdir -p out
+          make O=out ARCH=arm64 whyred_defconfig
+          make -j$(nproc) O=out ARCH=arm64 CC=clang || true
+
       - name: Upload Kernel (Image.gz-dtb)
+        if: success() || always()
         uses: actions/upload-artifact@v4
         with:
           name: kernel
-          path: ${{ steps.build.outputs.outfile }}
+          path: ${{ steps.build.outputs.outfile || 'out/arch/arm64/boot/Image.gz-dtb' }}
 
       - name: Upload Image.xz
+        if: success() || always()
         uses: actions/upload-artifact@v4
         with:
           name: image-xz
           path: out/arch/arm64/boot/Image.xz
 
       - name: Upload kernel.dtb
+        if: success() || always()
         uses: actions/upload-artifact@v4
         with:
           name: kernel-dtb
