@@ -1,35 +1,33 @@
-name: Compile kernel
+name: Kernel Build
 
 on:
   workflow_dispatch:
 
 jobs:
-  compile:
+  build:
     runs-on: ubuntu-latest
-
     steps:
-      - uses: actions/checkout@v5
+      - name: Checkout kernel source
+        uses: actions/checkout@v4
 
-      - name: Get AOSP Clang
+      - name: Clone Zyc Clang 22.0.0
         run: |
-          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/mirror-goog-main-llvm-toolchain-source/clang-r574158.tar.gz
-          mkdir aosp-clang
-          tar -xzf clang-r574158.tar.gz -C aosp-clang
+          git clone --depth=1 https://github.com/ZyCromerZ/Clang.git -b 22 /tmp/zyc
 
-      - name: Compile kernel
-        run: ./scripts/RvCompiler/compile.sh DEFCONFIG=vendor/whyred-perf_defconfig CLANG_DIR=$PWD/aosp-clang KBUILD_BUILD_USER=Rve KBUILD_BUILD_HOST=RvEnterprises
+      - name: Android kernel build (Zyc Clang 22 + Full LTO + POLLY)
+        uses: lemniskett/android-kernel-actions@master
+        id: build
+        env:
+          NAME: RezzzzFy
+        with:
+          arch: arm64
+          compiler: clang
+          clang-path: /tmp/zyc
+          defconfig: whyred_defconfig
+          image: Image.gz-dtb
 
-      - name: Upload Image & DTBO
+      - name: Upload Kernel
         uses: actions/upload-artifact@v4
         with:
-          name: RvKernel-Alioth
-          path: |
-            out/arch/arm64/boot/Image
-            out/arch/arm64/boot/dtb.img
-            out/arch/arm64/boot/image.gz-dtb
-
-      - name: Upload log
-        uses: actions/upload-artifact@v4
-        with:
-          name: compile-log
-          path: out/compile.log
+          name: kernel
+          path: ${{ steps.build.outputs.outfile }}
