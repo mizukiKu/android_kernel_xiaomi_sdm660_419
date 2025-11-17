@@ -142,16 +142,6 @@ jobs:
           defconfig: whyred_defconfig
           image: Image.gz-dtb
 
-      - name: Fallback: manual kernel build for debugging (runs if action failed)
-        if: failure()
-        run: |
-          echo "Action-based kernel build failed — attempting manual make using CLANG_PATH or system clang."
-          export PATH="${CLANG_PATH:-/usr/bin}:$PATH"
-          export CC=clang
-          mkdir -p out
-          make O=out ARCH=arm64 whyred_defconfig
-          make -j$(nproc) O=out ARCH=arm64 CC=clang || true
-
       - name: Upload Kernel (Image.gz-dtb)
         if: success() || always()
         uses: actions/upload-artifact@v4
