@@ -23,7 +23,7 @@ jobs:
           arch: arm64
           compiler: clang
           clang-path: /tmp/zyc
-          defconfig: whyred_defconfig
+          defconfig: vendor/whyred-perf_defconfig
           image: Image.gz-dtb
 
       - name: Upload Kernel
