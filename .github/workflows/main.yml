@@ -1,125 +1,162 @@
 name: Build Kernel (ZyC Clang)
 
-on: workflow_dispatch: inputs: clang_version: description: 'ZyC clang version tag (example: 22.0.0)' required: true default: '22.0.0' kernel_repo: description: 'Kernel git repo URL (ssh or https)' required: true default: 'https://github.com/torvalds/linux.git' kernel_ref: description: 'Git ref (branch, tag or commit) to checkout' required: true default: 'main' defconfig: description: 'Kernel defconfig to use (e.g. defconfig or vendor/my_defconfig)' required: true default: 'defconfig' arch: description: 'Target architecture (default: arm64)' required: true default: 'arm64' dtb_glob: description: 'Glob to find the resulting .dtb inside the build output (e.g. "/myboard.dtb" or "**/dtb-/myboard.dtb")' required: true default: '**/*.dtb'
+on:
+  workflow_dispatch:
+    inputs:
+      clang_version:
+        description: 'ZyC clang version tag (example: 22.0.0)'
+        required: true
+        default: '22.0.0'
+      kernel_repo:
+        description: 'Kernel git repo URL (ssh or https)'
+        required: true
+        default: 'https://github.com/torvalds/linux.git'
+      kernel_ref:
+        description: 'Git ref (branch, tag or commit) to checkout'
+        required: true
+        default: 'main'
+      defconfig:
+        description: 'Kernel defconfig to use (e.g. defconfig or vendor/my_defconfig)'
+        required: true
+        default: 'defconfig'
+      arch:
+        description: 'Target architecture (default: arm64)'
+        required: true
+        default: 'arm64'
+      dtb_glob:
+        description: 'Glob to find the resulting .dtb inside the build output (e.g. "*/myboard.dtb" or "**/dtb-*/myboard.dtb")'
+        required: true
+        default: '**/*.dtb'
 
-jobs: build: runs-on: ubuntu-latest timeout-minutes: 120 steps: - name: Checkout (light) uses: actions/checkout@v4 with: repository: ${{ inputs.kernel_repo }} ref: ${{ inputs.kernel_ref }} fetch-depth: 1
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout (light)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.kernel_repo }}
+          ref: ${{ inputs.kernel_ref }}
+          fetch-depth: 1
 
-- name: Install build dependencies
-    run: |
-      sudo apt-get update
-      sudo apt-get install -y --no-install-recommends \
-        build-essential libssl-dev bc bison flex libelf-dev dwarves libncurses-dev \
-        crossbuild-essential-arm64 ca-certificates xz-utils wget git
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential libssl-dev bc bison flex libelf-dev dwarves libncurses-dev \
+            crossbuild-essential-arm64 ca-certificates xz-utils wget git
 
-  - name: Download ZyC clang release (from GitHub releases)
-    env:
-      TAG: ${{ inputs.clang_version }}
-    run: |
-      echo "Finding ZyC Clang release for tag: $TAG"
-      API_URL="https://api.github.com/repos/ZyCromerZ/Clang/releases"
-      # find the first release that mentions the tag/version in the name or body
-      ASSET_URL=$(curl -s "$API_URL" | grep -E "browser_download_url.*tar.xz" | sed -n 's/ *"browser_download_url": "[^"]*".*/\1/p' | grep -i "$TAG" | head -n1 || true)
-      if [ -z "$ASSET_URL" ]; then
-        echo "Could not find release asset automatically for $TAG. Trying a common filename pattern..."
-        POSSIBLE="https://github.com/ZyCromerZ/Clang/releases/download/${TAG}/ZyC-Clang-${TAG}.tar.xz https://github.com/ZyCromerZ/Clang/releases/download/${TAG}/ZyC-Clang-${TAG}_x86_64.tar.xz"
-        for u in $POSSIBLE; do
-          if curl --head --silent --fail "$u" >/dev/null 2>&1; then
-            ASSET_URL=$u
-            break
+      - name: Download ZyC clang release (from GitHub releases)
+        env:
+          TAG: ${{ inputs.clang_version }}
+        run: |
+          echo "Finding ZyC Clang release for tag: $TAG"
+          API_URL="https://api.github.com/repos/ZyCromerZ/Clang/releases"
+          # find the first release that mentions the tag/version in the name or body
+          ASSET_URL=$(curl -s "$API_URL" | grep -E "browser_download_url.*tar.xz" | sed -n 's/ *"browser_download_url": "\([^"]*\)".*/\1/p' | grep -i "$TAG" | head -n1 || true)
+          if [ -z "$ASSET_URL" ]; then
+            echo "Could not find release asset automatically for $TAG. Trying a common filename pattern..."
+            POSSIBLE="https://github.com/ZyCromerZ/Clang/releases/download/${TAG}/ZyC-Clang-${TAG}.tar.xz https://github.com/ZyCromerZ/Clang/releases/download/${TAG}/ZyC-Clang-${TAG}_x86_64.tar.xz"
+            for u in $POSSIBLE; do
+              if curl --head --silent --fail "$u" >/dev/null 2>&1; then
+                ASSET_URL=$u
+                break
+              fi
+            done
           fi
-        done
-      fi
-      if [ -z "$ASSET_URL" ]; then
-        echo "ERROR: Could not locate ZyC Clang release asset for ${TAG}."
-        echo "Please verify the tag and availability at https://github.com/ZyCromerZ/Clang/releases"
-        exit 1
-      fi
-      echo "Downloading $ASSET_URL"
-      mkdir -p /opt/zyc
-      wget -qO /tmp/zyc-clang.tar.xz "$ASSET_URL"
-      sudo tar -xJf /tmp/zyc-clang.tar.xz -C /opt/zyc --strip-components=1
-      sudo chmod -R a+rx /opt/zyc
+          if [ -z "$ASSET_URL" ]; then
+            echo "ERROR: Could not locate ZyC Clang release asset for ${TAG}."
+            echo "Please verify the tag and availability at https://github.com/ZyCromerZ/Clang/releases"
+            exit 1
+          fi
+          echo "Downloading $ASSET_URL"
+          mkdir -p /opt/zyc
+          wget -qO /tmp/zyc-clang.tar.xz "$ASSET_URL"
+          sudo tar -xJf /tmp/zyc-clang.tar.xz -C /opt/zyc --strip-components=1
+          sudo chmod -R a+rx /opt/zyc
 
-  - name: Add ZyC clang to PATH
-    run: |
-      echo "/opt/zyc/bin" >> $GITHUB_PATH
-      echo "/opt/zyc/lib" >> $GITHUB_PATH || true
+      - name: Add ZyC clang to PATH
+        run: |
+          echo "/opt/zyc/bin" >> $GITHUB_PATH
+          echo "/opt/zyc/lib" >> $GITHUB_PATH || true
 
-  - name: Show clang version
-    run: |
-      clang --version || true
+      - name: Show clang version
+        run: |
+          clang --version || true
 
-  - name: Configure kernel (defconfig)
-    run: |
-      set -e
-      OUT=out
-      export PATH=/opt/zyc/bin:$PATH
-      export CC=clang
-      export LD=ld.lld
-      export AR=llvm-ar
-      export NM=llvm-nm
-      export OBJCOPY=llvm-objcopy
-      export OBJDUMP=llvm-objdump
-      export STRIP=llvm-strip
-      export CROSS_COMPILE=aarch64-linux-gnu-
-      echo "Using ARCH=${{ inputs.arch }} and defconfig=${{ inputs.defconfig }}"
-      make O=$OUT ARCH=${{ inputs.arch }} ${{ inputs.defconfig }}
+      - name: Configure kernel (defconfig)
+        run: |
+          set -e
+          OUT=out
+          export PATH=/opt/zyc/bin:$PATH
+          export CC=clang
+          export LD=ld.lld
+          export AR=llvm-ar
+          export NM=llvm-nm
+          export OBJCOPY=llvm-objcopy
+          export OBJDUMP=llvm-objdump
+          export STRIP=llvm-strip
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          echo "Using ARCH=${{ inputs.arch }} and defconfig=${{ inputs.defconfig }}"
+          make O=$OUT ARCH=${{ inputs.arch }} ${{ inputs.defconfig }}
 
-  - name: Build Image and dtbs
-    run: |
-      set -e
-      OUT=out
-      export PATH=/opt/zyc/bin:$PATH
-      export CC=clang
-      export LD=ld.lld
-      export AR=llvm-ar
-      export NM=llvm-nm
-      export OBJCOPY=llvm-objcopy
-      export OBJDUMP=llvm-objdump
-      export STRIP=llvm-strip
-      export CROSS_COMPILE=aarch64-linux-gnu-
+      - name: Build Image and dtbs
+        run: |
+          set -e
+          OUT=out
+          export PATH=/opt/zyc/bin:$PATH
+          export CC=clang
+          export LD=ld.lld
+          export AR=llvm-ar
+          export NM=llvm-nm
+          export OBJCOPY=llvm-objcopy
+          export OBJDUMP=llvm-objdump
+          export STRIP=llvm-strip
+          export CROSS_COMPILE=aarch64-linux-gnu-
 
-      NPROC=$(nproc)
-      echo "Starting kernel build with $NPROC jobs"
+          NPROC=$(nproc)
+          echo "Starting kernel build with $NPROC jobs"
 
-      # Build the kernel Image
-      make -j${NPROC} O=$OUT ARCH=${{ inputs.arch }} Image
+          # Build the kernel Image
+          make -j${NPROC} O=$OUT ARCH=${{ inputs.arch }} Image
 
-      # Compress Image to Image.xz (parallel)
-      mkdir -p artifacts
-      IMAGE_PATH="$OUT/arch/${{ inputs.arch }}/boot/Image"
-      if [ ! -f "$IMAGE_PATH" ]; then
-        echo "Image not found at $IMAGE_PATH"
-        exit 1
-      fi
-      xz -T0 -c "$IMAGE_PATH" > artifacts/Image.xz
+          # Compress Image to Image.xz (parallel)
+          mkdir -p artifacts
+          IMAGE_PATH="$OUT/arch/${{ inputs.arch }}/boot/Image"
+          if [ ! -f "$IMAGE_PATH" ]; then
+            echo "Image not found at $IMAGE_PATH"
+            exit 1
+          fi
+          xz -T0 -c "$IMAGE_PATH" > artifacts/Image.xz
 
-      # Build dtbs
-      make -j${NPROC} O=$OUT ARCH=${{ inputs.arch }} dtbs
+          # Build dtbs
+          make -j${NPROC} O=$OUT ARCH=${{ inputs.arch }} dtbs
 
-      # Try to find a single DTB matching the provided glob
-      DTB_GLOB='${{ inputs.dtb_glob }}'
-      FOUND_DTB=$(find $OUT -type f -name "*.dtb" -path "$OUT/*" | grep -E "$DTB_GLOB" -m1 || true)
-      if [ -z "$FOUND_DTB" ]; then
-        # fallback: find any dtb
-        FOUND_DTB=$(find $OUT -type f -name "*.dtb" | head -n1 || true)
-      fi
-      if [ -z "$FOUND_DTB" ]; then
-        echo "No .dtb produced or found in $OUT"
-        ls -R $OUT | sed -n '1,200p'
-        exit 1
-      fi
-      echo "Found DTB: $FOUND_DTB"
-      cp "$FOUND_DTB" artifacts/kernel.dtb
+          # Try to find a single DTB matching the provided glob
+          DTB_GLOB='${{ inputs.dtb_glob }}'
+          FOUND_DTB=$(find $OUT -type f -name "*.dtb" -path "$OUT/*" | grep -E "$DTB_GLOB" -m1 || true)
+          if [ -z "$FOUND_DTB" ]; then
+            # fallback: find any dtb
+            FOUND_DTB=$(find $OUT -type f -name "*.dtb" | head -n1 || true)
+          fi
+          if [ -z "$FOUND_DTB" ]; then
+            echo "No .dtb produced or found in $OUT"
+            ls -R $OUT | sed -n '1,200p'
+            exit 1
+          fi
+          echo "Found DTB: $FOUND_DTB"
+          cp "$FOUND_DTB" artifacts/kernel.dtb
 
-  - name: Upload artifacts (Image.xz and kernel.dtb)
-    uses: actions/upload-artifact@v4
-    with:
-      name: kernel-artifacts
-      path: |
-        artifacts/Image.xz
-        artifacts/kernel.dtb
+      - name: Upload artifacts (Image.xz and kernel.dtb)
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-artifacts
+          path: |
+            artifacts/Image.xz
+            artifacts/kernel.dtb
 
-  - name: Print artifacts list
-    run: |
-      ls -l artifacts || true
+      - name: Print artifacts list
+        run: |
+          ls -l artifacts || true
+          
