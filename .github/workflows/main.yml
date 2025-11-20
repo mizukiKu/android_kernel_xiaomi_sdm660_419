@@ -1,71 +1,125 @@
-name: RezzzFy Project
+name: Build Kernel (ZyC Clang)
 
-on:
-  workflow_dispatch:
+on: workflow_dispatch: inputs: clang_version: description: 'ZyC clang version tag (example: 22.0.0)' required: true default: '22.0.0' kernel_repo: description: 'Kernel git repo URL (ssh or https)' required: true default: 'https://github.com/torvalds/linux.git' kernel_ref: description: 'Git ref (branch, tag or commit) to checkout' required: true default: 'main' defconfig: description: 'Kernel defconfig to use (e.g. defconfig or vendor/my_defconfig)' required: true default: 'defconfig' arch: description: 'Target architecture (default: arm64)' required: true default: 'arm64' dtb_glob: description: 'Glob to find the resulting .dtb inside the build output (e.g. "/myboard.dtb" or "**/dtb-/myboard.dtb")' required: true default: '**/*.dtb'
 
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout kernel source
-        uses: actions/checkout@v4
+jobs: build: runs-on: ubuntu-latest timeout-minutes: 120 steps: - name: Checkout (light) uses: actions/checkout@v4 with: repository: ${{ inputs.kernel_repo }} ref: ${{ inputs.kernel_ref }} fetch-depth: 1
 
-      - name: SUKISU ULTRA setup
-        run: |
-          curl -LSs "https://raw.githubusercontent.com/kerjarodipp-glitch/SukiSU-Ultra/refs/heads/susfs-main/kernel/setup.sh" | bash -s susfs-main
+- name: Install build dependencies
+    run: |
+      sudo apt-get update
+      sudo apt-get install -y --no-install-recommends \
+        build-essential libssl-dev bc bison flex libelf-dev dwarves libncurses-dev \
+        crossbuild-essential-arm64 ca-certificates xz-utils wget git
 
-      - name: Run kernel source helper scripts
-        run: |
-          set -euo pipefail
-
-          echo "Running scripts/mkcompile_h ..."
-          if [ -f scripts/mkcompile_h ]; then
-            chmod +x scripts/mkcompile_h
-            scripts/mkcompile_h
-          else
-            echo "scripts/mkcompile_h not found."
+  - name: Download ZyC clang release (from GitHub releases)
+    env:
+      TAG: ${{ inputs.clang_version }}
+    run: |
+      echo "Finding ZyC Clang release for tag: $TAG"
+      API_URL="https://api.github.com/repos/ZyCromerZ/Clang/releases"
+      # find the first release that mentions the tag/version in the name or body
+      ASSET_URL=$(curl -s "$API_URL" | grep -E "browser_download_url.*tar.xz" | sed -n 's/ *"browser_download_url": "[^"]*".*/\1/p' | grep -i "$TAG" | head -n1 || true)
+      if [ -z "$ASSET_URL" ]; then
+        echo "Could not find release asset automatically for $TAG. Trying a common filename pattern..."
+        POSSIBLE="https://github.com/ZyCromerZ/Clang/releases/download/${TAG}/ZyC-Clang-${TAG}.tar.xz https://github.com/ZyCromerZ/Clang/releases/download/${TAG}/ZyC-Clang-${TAG}_x86_64.tar.xz"
+        for u in $POSSIBLE; do
+          if curl --head --silent --fail "$u" >/dev/null 2>&1; then
+            ASSET_URL=$u
+            break
           fi
+        done
+      fi
+      if [ -z "$ASSET_URL" ]; then
+        echo "ERROR: Could not locate ZyC Clang release asset for ${TAG}."
+        echo "Please verify the tag and availability at https://github.com/ZyCromerZ/Clang/releases"
+        exit 1
+      fi
+      echo "Downloading $ASSET_URL"
+      mkdir -p /opt/zyc
+      wget -qO /tmp/zyc-clang.tar.xz "$ASSET_URL"
+      sudo tar -xJf /tmp/zyc-clang.tar.xz -C /opt/zyc --strip-components=1
+      sudo chmod -R a+rx /opt/zyc
 
-          echo "Running build-all.py ..."
-          if [ -f build-all.py ]; then
-            chmod +x build-all.py
-            ./build-all.py
-          else
-            echo "build-all.py not found."
-          fi
+  - name: Add ZyC clang to PATH
+    run: |
+      echo "/opt/zyc/bin" >> $GITHUB_PATH
+      echo "/opt/zyc/lib" >> $GITHUB_PATH || true
 
-      - name: Android kernel build
-        uses: lemniskett/android-kernel-actions@master
-        id: build
-        env:
-          NAME: RezzzFy
-        with:
-          arch: arm64
-          compiler: gcc/12
-          defconfig: vendor/whyred-perf_defconfig
-          image: Image.gz-dtb
+  - name: Show clang version
+    run: |
+      clang --version || true
 
-      - name: Prepare image.xz and kernel.dtb
-        shell: bash
-        run: |
-          set -euo pipefail
-          infile="${{ steps.build.outputs.outfile }}"
+  - name: Configure kernel (defconfig)
+    run: |
+      set -e
+      OUT=out
+      export PATH=/opt/zyc/bin:$PATH
+      export CC=clang
+      export LD=ld.lld
+      export AR=llvm-ar
+      export NM=llvm-nm
+      export OBJCOPY=llvm-objcopy
+      export OBJDUMP=llvm-objdump
+      export STRIP=llvm-strip
+      export CROSS_COMPILE=aarch64-linux-gnu-
+      echo "Using ARCH=${{ inputs.arch }} and defconfig=${{ inputs.defconfig }}"
+      make O=$OUT ARCH=${{ inputs.arch }} ${{ inputs.defconfig }}
 
-          mkdir -p out
-          cp "$infile" out/Image.gz-dtb
+  - name: Build Image and dtbs
+    run: |
+      set -e
+      OUT=out
+      export PATH=/opt/zyc/bin:$PATH
+      export CC=clang
+      export LD=ld.lld
+      export AR=llvm-ar
+      export NM=llvm-nm
+      export OBJCOPY=llvm-objcopy
+      export OBJDUMP=llvm-objdump
+      export STRIP=llvm-strip
+      export CROSS_COMPILE=aarch64-linux-gnu-
 
-          gunzip -c out/Image.gz-dtb > out/Image
-          xz -z -9 -c out/Image > out/image.xz
+      NPROC=$(nproc)
+      echo "Starting kernel build with $NPROC jobs"
 
-          DTB_OUT="out/kernel.dtb"
-          if [ -f "./scripts/extract-dtb.py" ]; then
-            python3 ./scripts/extract-dtb.py out/Image.gz-dtb "$DTB_OUT" || true
-          else
-            touch "$DTB_OUT"
-          fi
+      # Build the kernel Image
+      make -j${NPROC} O=$OUT ARCH=${{ inputs.arch }} Image
 
-      - name: Upload Built Kernel artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: built-kernel
-          path: out/
+      # Compress Image to Image.xz (parallel)
+      mkdir -p artifacts
+      IMAGE_PATH="$OUT/arch/${{ inputs.arch }}/boot/Image"
+      if [ ! -f "$IMAGE_PATH" ]; then
+        echo "Image not found at $IMAGE_PATH"
+        exit 1
+      fi
+      xz -T0 -c "$IMAGE_PATH" > artifacts/Image.xz
+
+      # Build dtbs
+      make -j${NPROC} O=$OUT ARCH=${{ inputs.arch }} dtbs
+
+      # Try to find a single DTB matching the provided glob
+      DTB_GLOB='${{ inputs.dtb_glob }}'
+      FOUND_DTB=$(find $OUT -type f -name "*.dtb" -path "$OUT/*" | grep -E "$DTB_GLOB" -m1 || true)
+      if [ -z "$FOUND_DTB" ]; then
+        # fallback: find any dtb
+        FOUND_DTB=$(find $OUT -type f -name "*.dtb" | head -n1 || true)
+      fi
+      if [ -z "$FOUND_DTB" ]; then
+        echo "No .dtb produced or found in $OUT"
+        ls -R $OUT | sed -n '1,200p'
+        exit 1
+      fi
+      echo "Found DTB: $FOUND_DTB"
+      cp "$FOUND_DTB" artifacts/kernel.dtb
+
+  - name: Upload artifacts (Image.xz and kernel.dtb)
+    uses: actions/upload-artifact@v4
+    with:
+      name: kernel-artifacts
+      path: |
+        artifacts/Image.xz
+        artifacts/kernel.dtb
+
+  - name: Print artifacts list
+    run: |
+      ls -l artifacts || true
