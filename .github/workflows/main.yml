@@ -1,7 +1,12 @@
-name: Build kernel (ZyC Clang 15.0.7) - whyred-perf
+name: Build kernel (Zyc Clang) - whyred-perf
 
 on:
   workflow_dispatch:
+    inputs:
+      zyc_url:
+        description: 'Full URL ke tarball Zyc Clang (contoh: https://....tar.xz). Jika kosong, ganti default di file.'
+        required: false
+        default: ''
 
 jobs:
   build:
@@ -10,87 +15,71 @@ jobs:
       ARCH: arm64
       DEFCONFIG: vendor/whyred-perf_defconfig
       KERNEL_OUT: out
-      # ZyC Clang 15.0.7 tarball (dari file Clang-15-link.txt yang kamu tampilkan)
-      ZYC_DEFAULT_URL: "https://github.com/ZyCromerZ/Clang/releases/download/15.0.7-20251111-release/Clang-15.0.7-20251111.tar.gz"
+      # Ubahlah default URL jika ingin auto-download tanpa memasukkan input.
+      ZYC_DEFAULT_URL: '' # <-- isi URL default di sini jika mau
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Prepare env variables
+      - name: Set up variables
         run: |
-          echo "ZYC_URL=${{ env.ZYC_DEFAULT_URL }}" >> $GITHUB_ENV
+          if [ -n "${{ github.event.inputs.zyc_url }}" ]; then
+            echo "ZYC_URL=${{ github.event.inputs.zyc_url }}" >> $GITHUB_ENV
+          else
+            echo "ZYC_URL=${ZYC_DEFAULT_URL}" >> $GITHUB_ENV
+          fi
           echo "O=${{ env.KERNEL_OUT }}" >> $GITHUB_ENV
           echo "ARCH=${{ env.ARCH }}" >> $GITHUB_ENV
           echo "DEFCONFIG=${{ env.DEFCONFIG }}" >> $GITHUB_ENV
-
+      - name: Validate Zyc URL
+        run: |
+          if [ -z "${ZYC_URL}" ]; then
+            echo "ERROR: Zyc toolchain URL not provided. Set workflow_dispatch input 'zyc_url' or edit ZYC_DEFAULT_URL in workflow."
+            exit 1
+          fi
+          echo "Zyc URL: $ZYC_URL"
       - name: Download & extract Zyc Clang
         run: |
-          set -e
           mkdir -p /opt/zyc
-          TMPF=/tmp/zyc_toolchain.tar.gz
-          echo "Downloading Zyc Clang from $ZYC_URL"
+          TMPF=/tmp/zyc_toolchain.tar.xz
           curl -L --retry 5 --silent --show-error "${ZYC_URL}" -o "$TMPF"
-          # Extract (handles .tar.gz/.tar.xz)
-          if file "$TMPF" | grep -q 'gzip compressed'; then
+          # sesuaikan perintah ekstrak jika file .zip atau .tar.gz; contoh ini untuk .tar.xz/.tar.gz
+          if file "$TMPF" | grep -q 'XZ compressed'; then
+            tar -xJf "$TMPF" -C /opt/zyc --strip-components=0 || tar -xJf "$TMPF" -C /opt/zyc
+          elif file "$TMPF" | grep -q 'gzip compressed'; then
             tar -xzf "$TMPF" -C /opt/zyc
-          elif file "$TMPF" | grep -q 'XZ compressed'; then
-            tar -xJf "$TMPF" -C /opt/zyc
           else
-            tar -xf "$TMPF" -C /opt/zyc
+            echo "Unknown archive format, try manual extraction"
+            tar -xf "$TMPF" -C /opt/zyc || (echo "Extraction failed"; exit 1)
           fi
-          # try to find a bin directory inside extraction and add to PATH
-          BIN_DIR=$(find /opt/zyc -type d -name bin -print | head -n1 || true)
-          if [ -n "$BIN_DIR" ]; then
-            echo "$BIN_DIR" >> $GITHUB_PATH
-            echo "Added $BIN_DIR to PATH"
-          else
-            # sometimes clang itself sits in top-level folder
-            # try to find clang binary
-            CLANG_PATH=$(find /opt/zyc -type f -name clang -print | head -n1 || true)
-            if [ -n "$CLANG_PATH" ]; then
-              CLANG_BIN_DIR=$(dirname "$CLANG_PATH")
-              echo "$CLANG_BIN_DIR" >> $GITHUB_PATH
-              echo "Added $CLANG_BIN_DIR to PATH"
-            else
-              echo "Warning: clang not found inside extracted toolchain. Listing /opt/zyc:"
-              ls -la /opt/zyc || true
-            fi
+          # cari bin dir paling umum dan tambahkan ke PATH
+          # asumsi: ada folder bin di dalam hasil ekstrak, cari dan tambahkan
+          BIN_DIR=$(find /opt/zyc -type d -name bin -print | head -n1)
+          if [ -z "$BIN_DIR" ]; then
+            echo "No bin directory found inside extracted toolchain. Listing /opt/zyc:"
+            ls -la /opt/zyc
+            exit 1
           fi
-
-      - name: Show toolchain & debug
+          echo "$BIN_DIR" >> $GITHUB_PATH
+          echo "Added $BIN_DIR to PATH"
+      - name: Show toolchain (debug)
         run: |
           echo "PATH: $PATH"
-          echo "clang -> $(which clang || true)"
+          which clang || true
           clang --version || true
-          echo "aarch64-linux-gnu-as -> $(which aarch64-linux-gnu-as || true)"
-          aarch64-linux-gnu-as --version || true
-
-      - name: Ensure aarch64 assembler (binutils) available
+          which aarch64-linux-gnu-gcc || true
+      - name: Prepare kernel output dir & defconfig
         run: |
-          set -e
-          if command -v aarch64-linux-gnu-as >/dev/null 2>&1; then
-            echo "Cross assembler present: $(which aarch64-linux-gnu-as)"
-          else
-            echo "Installing binutils-aarch64-linux-gnu"
-            sudo apt-get update
-            sudo apt-get install -y binutils-aarch64-linux-gnu
-          fi
-          echo "which aarch64-linux-gnu-as: $(which aarch64-linux-gnu-as || echo none)"
-          aarch64-linux-gnu-as --version || true
-
-      - name: Prepare out dir & defconfig
-        run: |
-          mkdir -p $O
-          make O=$O ARCH=$ARCH $DEFCONFIG
-
+          mkdir -p $KERNEL_OUT
+          # generate defconfig
+          make O=$KERNEL_OUT ARCH=$ARCH $DEFCONFIG
       - name: Build kernel (Clang/LLVM - Zyc)
         run: |
-          set -e
-          export O=$O
+          export O=$KERNEL_OUT
           export ARCH=${ARCH}
-          # use clang from extracted toolchain (already on PATH)
+          # clang build flags - arahkan binari llvm yang sudah ada via PATH
           export CC=clang
           export HOSTCC=clang
           export AR=llvm-ar
@@ -99,47 +88,48 @@ jobs:
           export OBJDUMP=llvm-objdump
           export STRIP=llvm-strip
           export LD=ld.lld
-          # ensure CROSS_COMPILE points to cross binutils prefix (will use installed or toolchain-provided)
+          # untuk beberapa konfigurasi, CROSS_COMPILE tetap diperlukan untuk tools
           export CROSS_COMPILE=aarch64-linux-gnu-
-          # show chosen bins
-          echo "Using CC: $(which $CC || true)"
-          echo "Using AR: $(which $AR || true)"
-          echo "Using CROSS_COMPILE as: $CROSS_COMPILE (which -> $(which ${CROSS_COMPILE}as || true))"
-          # run the build
+          # jalankan build; `-j` menggunakan jumlah core runner
           make -j$(nproc) O=$O ARCH=$ARCH CC=$CC HOSTCC=$HOSTCC \
             AR=$AR NM=$NM OBJCOPY=$OBJCOPY OBJDUMP=$OBJDUMP STRIP=$STRIP LD=$LD \
             CROSS_COMPILE=$CROSS_COMPILE
-
-      - name: Create Image.gz and collect artifacts
+      - name: Create Image.gz (and Image.gz-dtb if dtb present)
         run: |
           set -e
-          OUTDIR=$O/arch/arm64/boot
+          OUTDIR=$KERNEL_OUT/arch/arm64/boot
           mkdir -p build_output
-          # copy Image if exists and create Image.gz
+          # copy found images to build_output
           if [ -f "$OUTDIR/Image" ]; then
             cp "$OUTDIR/Image" build_output/Image
             gzip -9 -c "$OUTDIR/Image" > build_output/Image.gz
-            echo "Created build_output/Image.gz from Image"
+            echo "Created Image.gz"
           elif [ -f "$OUTDIR/Image.gz" ]; then
             cp "$OUTDIR/Image.gz" build_output/Image.gz
           else
-            echo "No Image found at $OUTDIR"
+            echo "No Image file found in $OUTDIR"
           fi
-          # copy Image.gz-dtb if produced
+          # dtb or Image.gz-dtb
           if [ -f "$OUTDIR/Image.gz-dtb" ]; then
             cp "$OUTDIR/Image.gz-dtb" build_output/Image.gz-dtb
+          elif [ -f "$OUTDIR/dts/*.dtb" ] || ls "$OUTDIR"/*.dtb 2>/dev/null | grep -q .; then
+            # if dtb exist, try to pack into Image.gz-dtb (best-effort)
+            DTB_LIST=$(ls $OUTDIR/*.dtb 2>/dev/null || true)
+            if [ -n "$DTB_LIST" ]; then
+              mkdir -p dtb_tmp
+              cp $OUTDIR/*.dtb dtb_tmp/ || true
+              # create a dtb blob if mkdtb exists; else just copy dtbs
+              if command -v mkdtb >/dev/null 2>&1; then
+                mkdtb -o build_output/Image.dtb dtb_tmp/*.dtb || true
+              else
+                cp dtb_tmp/*.dtb build_output/ || true
+              fi
+            fi
           fi
-          # copy dtbs if any
-          if ls "$OUTDIR"/*.dtb 1> /dev/null 2>&1; then
-            cp "$OUTDIR"/*.dtb build_output/ || true
-          fi
-          # copy other useful artifacts
-          cp -a "$O"/System.map* build_output/ 2>/dev/null || true
-          cp -a "$O"/modules* build_output/ 2>/dev/null || true
-          # full out tree as fallback/debug
-          cp -a $O build_output/kernel_out || true
-          ls -la build_output || true
-
+          # copy other artifacts (modules, System.map, dtbo)
+          cp -a "$OUTDIR"/* build_output/ 2>/dev/null || true
+          # copy whole O tree as fallback
+          cp -a $KERNEL_OUT build_output/kernel_out || true
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
