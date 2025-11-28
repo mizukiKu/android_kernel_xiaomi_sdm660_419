@@ -23,7 +23,7 @@ jobs:
     - name: Prepare dirs
       run: |
         mkdir -p toolchain
-        mkdir -p ${{ env.OUT_DIR }}
+        mkdir -p ${OUT_DIR}
 
     - name: Download ZyC clang 22 (input or secret)
       run: |
@@ -67,7 +67,7 @@ jobs:
       run: |
         make ARCH=${ARCH} O=${OUT_DIR} ${DEFCONFIG}
 
-    - name: Build kernel + dtbs
+    - name: Build kernel + dtbs (uses native HOSTCC for host tools)
       env:
         CC: clang
         CLANG_TRIPLE: aarch64-linux-gnu-
@@ -77,18 +77,30 @@ jobs:
         OBJCOPY: llvm-objcopy
         OBJDUMP: llvm-objdump
       run: |
-        # build Image and dtbs in one go
+        # ensure native host compilers are present (used for building host tools)
+        sudo apt-get update
+        sudo apt-get install -y gcc g++
+
+        # record build log and run build
+        set -o pipefail
+        exec > >(tee ${OUT_DIR}/build.log) 2>&1
+
+        # build kernel with clang for target and gcc for host utilities
+        HOSTCC=gcc HOSTCXX=g++ \
         make -j$(nproc) ARCH=${ARCH} O=${OUT_DIR} \
           CC=${CC} CLANG_TRIPLE=${CLANG_TRIPLE} LLVM=1 \
           LD=${LD} AR=${AR} NM=${NM} OBJCOPY=${OBJCOPY} OBJDUMP=${OBJDUMP}
-        # build dtbs explicitly (some trees require explicit target)
-        make -j$(nproc) ARCH=${ARCH} O=${OUT_DIR} dtbs
+
+        # explicit dtbs target
+        HOSTCC=gcc HOSTCXX=g++ make -j$(nproc) ARCH=${ARCH} O=${OUT_DIR} dtbs
 
     - name: Verify build outputs
       run: |
         echo "Listing possible image and dtb outputs:"
         ls -lah ${OUT_DIR}/arch/arm64/boot || true
         find ${OUT_DIR} -type f -name '*.dtb' -print || true
+        echo "Build log tail:"
+        tail -n 200 ${OUT_DIR}/build.log || true
 
     - name: Create image.xz from Image
       run: |
@@ -117,10 +129,9 @@ jobs:
 
     - name: Create kernel.dtb by concatenating DTBs
       run: |
-        # Prefer vendor dts first (common for Android vendor dtbs), then any other dtbs
         OUTDTB="./kernel.dtb"
         rm -f $OUTDTB
-        # vendor dtbs (if any)
+        # vendor dtbs first (if any)
         find ${OUT_DIR}/arch/arm64/ -path '*/dts/vendor/*' -type f -name '*.dtb' -print0 | sort -z | xargs -0 -r cat >> $OUTDTB || true
         # other dtbs
         find ${OUT_DIR}/arch/arm64/ -type f -name '*.dtb' -not -path '*/dts/vendor/*' -print0 | sort -z | xargs -0 -r cat >> $OUTDTB || true
@@ -138,3 +149,4 @@ jobs:
           image.xz
           kernel.dtb
           ${OUT_DIR}/build.log
+          
