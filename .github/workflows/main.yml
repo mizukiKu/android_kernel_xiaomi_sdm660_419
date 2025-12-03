@@ -1,152 +1,69 @@
-name: Build kernel (whyred-perf -> image.xz + kernel.dtb)
+name: Kernel Build - Whyred Perf (WeebX Clang)
 
 on:
   workflow_dispatch:
-    inputs:
-      clang_url:
-        description: 'Direct download URL for ZyC clang 22 tarball (or set secret ZYC_CLANG_URL)'
-        required: false
+  push:
+    branches:
+      - main
+      - master
 
 jobs:
   build:
+    name: Compile Kernel (whyred-perf)
     runs-on: ubuntu-latest
-    env:
-      ARCH: arm64
-      DEFCONFIG: vendor/whyred-perf_defconfig
-      OUT_DIR: out
+    timeout-minutes: 70
+
     steps:
-    - name: Checkout repo
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
+      - name: Checkout Kernel Source
+        uses: actions/checkout@v4
 
-    - name: Prepare dirs
-      run: |
-        mkdir -p toolchain
-        mkdir -p ${OUT_DIR}
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc bison build-essential ccache curl flex gcc clang lld git \
+            libncurses-dev libssl-dev zip lzop python3 python3-pip \
+            rsync unzip wget xz-utils
 
-    - name: Download ZyC clang 22 (input or secret)
-      run: |
-        if [ -n "${{ github.event.inputs.clang_url }}" ]; then
-          CLANG_URL="${{ github.event.inputs.clang_url }}"
-        elif [ -n "${{ secrets.ZYC_CLANG_URL }}" ]; then
-          CLANG_URL="${{ secrets.ZYC_CLANG_URL }}"
-        else
-          echo "ERROR: provide CLANG URL as workflow input or secret ZYC_CLANG_URL"
-          exit 1
-        fi
-        echo "Downloading clang from: ${CLANG_URL}"
-        curl -L --retry 5 -o toolchain/clang.tar.xz "${CLANG_URL}"
-        tar -xf toolchain/clang.tar.xz -C toolchain
-        # locate bin dir
-        CLANG_BIN=$(find toolchain -maxdepth 3 -type d -name "bin" | head -n1)
-        if [ -z "$CLANG_BIN" ]; then
-          echo "Cannot find clang bin dir inside extracted archive"
-          ls -R toolchain
-          exit 1
-        fi
-        echo "CLANG_BIN=${CLANG_BIN}" >> $GITHUB_ENV
+      - name: Clone WeebX Clang
+        run: |
+          git clone --depth=1 https://gitlab.com/XSans0/weebx-clang.git clang
+          echo "$GITHUB_WORKSPACE/clang/bin" >> $GITHUB_PATH
 
-    - name: Install packages
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y bc build-essential flex bison libncurses5-dev libssl-dev curl xz-utils lzop
+      - name: Setup Kernel Defconfig (whyred-perf_defconfig)
+        run: |
+          mkdir -p out
+          make O=out ARCH=arm64 whyred-perf_defconfig
 
-    - name: Add clang to PATH
-      run: |
-        echo "${CLANG_BIN}" >> $GITHUB_PATH
-        echo "PATH now contains: $(echo $PATH | tr ':' '\n' | tail -n5)"
-
-    - name: Show tool versions
-      run: |
-        clang --version || true
-        ${CLANG_BIN}/clang --version || true
-        which clang || true
-
-    - name: Create defconfig (vendor/whyred-perf_defconfig)
-      run: |
-        make ARCH=${ARCH} O=${OUT_DIR} ${DEFCONFIG}
-
-    - name: Build kernel + dtbs (uses native HOSTCC for host tools)
-      env:
-        CC: clang
-        CLANG_TRIPLE: aarch64-linux-gnu-
-        LD: ld.lld
-        AR: llvm-ar
-        NM: llvm-nm
-        OBJCOPY: llvm-objcopy
-        OBJDUMP: llvm-objdump
-      run: |
-        # ensure native host compilers are present (used for building host tools)
-        sudo apt-get update
-        sudo apt-get install -y gcc g++
-
-        # record build log and run build
-        set -o pipefail
-        exec > >(tee ${OUT_DIR}/build.log) 2>&1
-
-        # build kernel with clang for target and gcc for host utilities
-        HOSTCC=gcc HOSTCXX=g++ \
-        make -j$(nproc) ARCH=${ARCH} O=${OUT_DIR} \
-          CC=${CC} CLANG_TRIPLE=${CLANG_TRIPLE} LLVM=1 \
-          LD=${LD} AR=${AR} NM=${NM} OBJCOPY=${OBJCOPY} OBJDUMP=${OBJDUMP}
-
-        # explicit dtbs target
-        HOSTCC=gcc HOSTCXX=g++ make -j$(nproc) ARCH=${ARCH} O=${OUT_DIR} dtbs
-
-    - name: Verify build outputs
-      run: |
-        echo "Listing possible image and dtb outputs:"
-        ls -lah ${OUT_DIR}/arch/arm64/boot || true
-        find ${OUT_DIR} -type f -name '*.dtb' -print || true
-        echo "Build log tail:"
-        tail -n 200 ${OUT_DIR}/build.log || true
-
-    - name: Create image.xz from Image
-      run: |
-        KIMG="${OUT_DIR}/arch/arm64/boot/Image"
-        if [ -f "$KIMG" ]; then
-          # compress with xz (parallel)
-          xz -T0 -z -9 -k -f "$KIMG"
-          # move result to repo root artifact
-          if [ -f "${KIMG}.xz" ]; then
-            mv "${KIMG}.xz" ./image.xz
-          else
-            echo "Expected ${KIMG}.xz but not found"
+      - name: Build Kernel
+        run: |
+          export KBUILD_BUILD_USER="github-actions"
+          export KBUILD_BUILD_HOST="github"
+          make -j$(nproc) O=out ARCH=arm64 \
+            CC=clang \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+      
+      - name: Verify Build Outputs
+        run: |
+          if [ ! -f out/arch/arm64/boot/Image.gz ]; then
+            echo "❌ Image.gz not found!"
             exit 1
           fi
-        else
-          # try zImage
-          if [ -f "${OUT_DIR}/arch/arm64/boot/zImage" ]; then
-            xz -T0 -z -9 -k -f "${OUT_DIR}/arch/arm64/boot/zImage"
-            mv "${OUT_DIR}/arch/arm64/boot/zImage.xz" ./image.xz
-          else
-            echo "No Image or zImage found to compress"
+          if [ ! -f out/arch/arm64/boot/dts/qcom/whyred.dtb ]; then
+            echo "❌ kernel.dtb not found!"
             exit 1
           fi
-        fi
-        echo "image.xz created."
 
-    - name: Create kernel.dtb by concatenating DTBs
-      run: |
-        OUTDTB="./kernel.dtb"
-        rm -f $OUTDTB
-        # vendor dtbs first (if any)
-        find ${OUT_DIR}/arch/arm64/ -path '*/dts/vendor/*' -type f -name '*.dtb' -print0 | sort -z | xargs -0 -r cat >> $OUTDTB || true
-        # other dtbs
-        find ${OUT_DIR}/arch/arm64/ -type f -name '*.dtb' -not -path '*/dts/vendor/*' -print0 | sort -z | xargs -0 -r cat >> $OUTDTB || true
-        if [ ! -s $OUTDTB ]; then
-          echo "No dtb files found to create kernel.dtb"
-          exit 1
-        fi
-        echo "kernel.dtb created (size: $(stat -c%s $OUTDTB) bytes)"
+      - name: Compress Image to Image.xz
+        run: |
+          mkdir -p out_artifacts
+          xz -c out/arch/arm64/boot/Image.gz > out_artifacts/Image.xz
+          cp out/arch/arm64/boot/dts/qcom/whyred.dtb out_artifacts/kernel.dtb
 
-    - name: Upload artifacts (image.xz + kernel.dtb + build log)
-      uses: actions/upload-artifact@v4
-      with:
-        name: whyred-perf-kernel
-        path: |
-          image.xz
-          kernel.dtb
-          ${OUT_DIR}/build.log
-          
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Kernel-Build-Whyred-Perf
+          path: out_artifacts/
